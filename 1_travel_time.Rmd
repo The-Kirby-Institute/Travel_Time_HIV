@@ -1,0 +1,2163 @@
+
+
+```{r Initialise}
+##setwd()
+
+#######################r initialization####################
+# Clear workspace
+rm(list=ls()) 
+
+# Load libraries
+# Install required packages if not already installed
+library(readr)        # For reading CSV files
+library(tidyverse)    # For data manipulation and plotting
+library(sf)           # For reading and handling spatial data
+library(spdep)        # For spatial analysis, including Getis-Ord Gi*
+library(tmap)         # For thematic mapping
+library(lubridate)    # For date manipulation
+library(kableExtra)   # For table formatting
+library(dplyr)         # For data manipulation
+library(terra)
+library(geodata)
+library(traveltime)
+library(readxl)
+library(ggplot2)
+library(tidyterra)
+
+# Source to current directory and set working directory
+basePath <- getwd()
+
+# Restart R and set working directory to source file location. 
+
+##r User inputs
+##select project
+selectedproject<- "late_hiv_diagnosis"
+
+# Various directories
+projectFolder <- file.path(basePath,"projects", selectedproject)
+dataFolder <- file.path(basePath,"projects", selectedproject,"data")
+resultsFolder <- file.path(basePath,"projects", selectedproject, "output")
+figFolder <- file.path(basePath,"projects", selectedproject,"figures")
+# HIV data folder - for sourcing latest notification cleaning files
+HIVDataFolder <- file.path("C:", "onedrive", "OneDrive - UNSW", "HIV Trends Across Space and Time", 
+  "General")
+
+
+```
+
+
+```{r Input}
+# Specify project input files and load them
+hivdataFile<- file.path(HIVDataFolder, "hiv_data_cleaned_20250731.csv")
+# Read the CSV data
+hiv_data_all <- read_csv(hivdataFile, col_types = cols(
+  month_hiv_diag = col_character(),
+  age_hiv_notif = col_double(),
+  sex = col_character(),
+  gender = col_character(),
+  region_birth = col_character(),
+  au_birth = col_character(),
+  lang_home = col_character(),
+  year_arrival_aus = col_double(),
+  cd4_count_diag = col_double(),
+  late_hiv_diag_flag = col_logical(), 
+  newly_acq_hiv_flag = col_logical(),
+  hiv_exposure_risk = col_character(),
+  place_acq = col_character(),
+  state_res = col_character(),
+  phn_res = col_character(),
+  phn_name = col_character(),
+  previ_diag_overseas = col_logical(),
+  id = col_double(),
+  year_diag = col_double()
+))
+
+hiv_data_all <- hiv_data_all %>%
+  mutate(
+    advanced_hiv_diag_flag = case_when(
+      # If late_hiv_diag_flag is NA, return NA
+      is.na(late_hiv_diag_flag) ~ NA,
+      # If both conditions are met (cd4 < 200 AND late diagnosis), return TRUE
+      cd4_count_diag < 200 & late_hiv_diag_flag == TRUE ~ TRUE,
+      # All other cases return FALSE
+      TRUE ~ FALSE
+    )
+  )
+
+hiv_data_all <- hiv_data_all %>%
+  mutate(
+    cd4_50_hiv_diag_flag = case_when(
+      # If late_hiv_diag_flag is NA, return NA
+      is.na(late_hiv_diag_flag) ~ NA,
+      # If both conditions are met (cd4 < 50 AND late diagnosis), return TRUE
+      cd4_count_diag < 50 & late_hiv_diag_flag == TRUE ~ TRUE,
+      # All other cases return FALSE
+      TRUE ~ FALSE
+    )
+  )
+
+hiv_data <- hiv_data_all %>%
+  filter(
+    is.na(age_hiv_notif) | age_hiv_notif >= 18
+  )
+
+# Check data structure
+str(hiv_data)
+
+# Read PHN shapefile
+shapefile_path <- file.path(dataFolder, "phn.shp")
+phn_shp <- st_read(shapefile_path)
+
+# Inspect shapefile attribute fields
+names(phn_shp)
+
+# Ensure phn_res matches the PHN shapefile ID
+# Suppose PHN shapefile has a column named "PHN_CODE"
+phn_data <- phn_shp %>%
+  st_drop_geometry() %>%
+  dplyr::select(PHN_CODE) # Adjust as needed
+
+# Check matching PHNs
+unique(hiv_data$phn_res)
+unique(phn_data$PHN_CODE)
+
+# Load Australia shapefile for masking
+au_shapefile <- gadm(
+ country = "Australia",
+ level = 0,
+ path = tempdir(),
+ resolution = 2
+ )
+au_shapefile
+
+
+# Define location dataset file paths
+s100File   <- file.path(dataFolder, "s100_20250711.xlsx")
+gp_path    <- file.path(dataFolder, "nhsd_general_practice_full_20250819.xlsx")
+hosp_path  <- file.path(dataFolder, "nhsd_hospitals_full_20250819.xlsx")
+shc_path   <- file.path(dataFolder, "public_sexual_health_clinics_20250818.xlsx")
+
+# Process S100 data
+s100_data <- read_excel(s100File) %>%
+  filter(label %in% c(0, 4)) %>%  # Only keep label = 0 or 4 to avoid duplicates
+  select(x, y) %>%
+  filter(!is.na(x), !is.na(y)) %>%
+  distinct() %>%
+  mutate(
+    s100_label = 1,              # All S100 locations get s100_label = 1
+    type = "others100"           # Type is "others100"
+  )
+
+# Process GP data
+gp_data <- read_excel(gp_path) %>%
+  filter(is.na(sexual_clinic) |sexual_clinic == 1) %>%     # Exclude sexual clinics to avoid duplicates with shc_path
+  select(lon_final, lat_final, s100_label) %>%
+  rename(x = lon_final, y = lat_final) %>%
+  filter(!is.na(x), !is.na(y)) %>%
+  distinct() %>%
+  mutate(
+    s100_label = case_when(
+      s100_label == 1 ~ 1,
+      is.na(s100_label) ~ 0,
+      TRUE ~ 0
+    ),
+    type = "gp"
+  )
+
+# Process Hospital data
+hosp_data <- read_excel(hosp_path) %>%
+  filter(is.na(sexual_clinic) |sexual_clinic != 1) %>%     # Exclude sexual clinics to avoid duplicates with shc_path
+  select(lon_final, lat_final, s100_label) %>%
+  rename(x = lon_final, y = lat_final) %>%
+  filter(!is.na(x), !is.na(y)) %>%
+  distinct() %>%
+  mutate(
+    s100_label = case_when(
+      s100_label == 1 ~ 1,
+      is.na(s100_label) ~ 0,
+      TRUE ~ 0
+    ),
+    type = "hospital"
+  )
+
+# Process Sexual Health Clinics data
+shc_data <- read_excel(shc_path) %>%
+  filter(!is.na(x), !is.na(y), free %in% c(1,2,5) ) %>% # add filter for free clinics only
+  select(x, y, s100_label) %>%
+  distinct() %>%
+  mutate(
+    s100_label = case_when(
+      s100_label == 1 ~ 1,
+      is.na(s100_label) ~ 0,
+      TRUE ~ 0
+    ),
+    type = "shc"
+  )
+
+# Combine all datasets
+location_combined_data <- bind_rows(
+  s100_data,
+  gp_data,
+  hosp_data,
+  shc_data
+) %>%
+  select(x, y, s100_label, type) %>%
+  distinct()  # Remove any remaining duplicates
+
+
+```
+
+```{r load runned travel time files}
+#### Load population raster with quick running####
+# Paths
+cacheFolder <- file.path(dataFolder, "_cache")
+
+fric_file <- file.path(cacheFolder, "friction_motor2020_au_s100.tif")
+tt_file   <- file.path(cacheFolder, "traveltime_au_motor2020_pointsset_v1_s100.tif")
+pts_file  <- file.path(cacheFolder, "points_used_for_traveltime_s100.csv")
+meta_file <- file.path(cacheFolder, "traveltime_au_metadata_s100.json")
+phn_travel_file <- file.path(cacheFolder, "phn_travel_s100.gpkg")
+
+fric_file <- file.path(cacheFolder, "friction_motor2020_au_all.tif")
+tt_file   <- file.path(cacheFolder, "traveltime_au_motor2020_pointsset_v1_all.tif")
+pts_file  <- file.path(cacheFolder, "points_used_for_traveltime_all.csv")
+meta_file <- file.path(cacheFolder, "traveltime_au_metadata_all.json")
+phn_travel_file <- file.path(cacheFolder, "phn_travel_all.gpkg")
+phn_travel_file_all <- file.path(cacheFolder, "phn_travel_all.gpkg")
+
+fric_file <- file.path(cacheFolder, "friction_motor2020_au_freeshc.tif")
+tt_file   <- file.path(cacheFolder, "traveltime_au_motor2020_pointsset_v1_freeshc.tif")
+pts_file  <- file.path(cacheFolder, "points_used_for_traveltime_freeshc.csv")
+meta_file <- file.path(cacheFolder, "traveltime_au_metadata_freeshc.json")
+phn_travel_file <- file.path(cacheFolder, "phn_travel_freeshc.gpkg")
+
+# Reload the exact saved objects (lazy-open for rasters)
+friction_au                 <- terra::rast(fric_file)
+travel_time_au              <- terra::rast(tt_file)
+selected_location_full_clean <- readr::read_csv(pts_file, show_col_types = FALSE)
+meta                        <- jsonlite::read_json(meta_file, simplifyVector = TRUE)
+phn_map_reach <- sf::st_read(phn_travel_file)
+
+
+```
+
+
+```{r Travel time calculation}
+#### Jump this if loaded ####
+
+# Select locations for travel time calculation
+selected_location_full <- location_combined_data 
+
+selected_location_full <- location_combined_data %>%
+                           filter(type == "shc")
+
+selected_location <- selected_location_full %>%
+                     select(x, y)
+
+# 1. Get friction surface for Australia and mask to country boundary
+friction_au <- get_friction_surface(
+    surface = "motor2020",
+    extent = au_shapefile
+  )|> 
+  mask(au_shapefile)
+
+
+selected_location_sf <- st_as_sf(selected_location, coords = c("x","y"), crs = 4326)
+
+# 2. Inspect the friction raster’s CRS and extent
+crs(friction_au)        # e.g. "+proj=longlat +datum=WGS84…"
+ext(rast(friction_au))  # get its bounding box
+
+# 3. Reproject points to match
+selected_location_proj <- st_transform(selected_location_sf, crs(friction_au))
+
+# 4. filter to only those within the raster’s extent
+bb <- ext(rast(friction_au))
+coords <- st_coordinates(selected_location_proj)
+inside <- coords[,1] >= bb$xmin & coords[,1] <= bb$xmax &
+          coords[,2] >= bb$ymin & coords[,2] <= bb$ymax
+selected_location_clean <- coords[inside, , drop=FALSE]
+selected_location_sf_clean <- selected_location_proj[inside, , drop = FALSE]
+selected_location_full_clean <- selected_location_full[inside, ]
+
+# 5. Run travel time
+travel_time_au <- calculate_travel_time(
+  friction_surface = friction_au,
+  points           = selected_location_clean
+)
+
+#### save the rasters ####
+cacheFolder <- file.path(dataFolder, "_cache")
+
+fric_file <- file.path(cacheFolder, "friction_motor2020_au_freeshc.tif")
+tt_file   <- file.path(cacheFolder, "traveltime_au_motor2020_pointsset_v1_freeshc.tif")
+pts_file  <- file.path(cacheFolder, "points_used_for_traveltime_freeshc.csv")
+meta_file <- file.path(cacheFolder, "traveltime_au_metadata_freeshc.json")
+
+# Write friction raster only if not already present
+if (!file.exists(fric_file)) {
+  terra::writeRaster(
+    friction_au, fric_file,
+    overwrite = FALSE,
+    gdal = c("TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")
+  )
+} else {
+  message("File already exists: ", fric_file)
+}
+
+# Write points CSV only if not already present
+if (!file.exists(pts_file)) {
+  readr::write_csv(as.data.frame(selected_location_full_clean), pts_file)
+} else {
+  message("File already exists: ", pts_file)
+}
+
+# Write travel time raster only if not already present
+if (!file.exists(tt_file)) {
+  terra::writeRaster(
+    travel_time_au, tt_file,
+    overwrite = FALSE,
+    datatype = "FLT4S",
+    NAflag = -9999,
+    gdal = c("TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")
+  )
+} else {
+  message("File already exists: ", tt_file)
+}
+
+# Write metadata only if not already present
+if (!file.exists(meta_file)) {
+  meta <- list(
+    created_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    surface = "motor2020",
+    raster_file = tt_file,
+    friction_file = fric_file,
+    n_points = nrow(selected_location_clean),
+    crs_wkt = as.character(terra::crs(travel_time_au))
+  )
+  jsonlite::write_json(meta, meta_file, pretty = TRUE, auto_unbox = TRUE)
+} else {
+  message("File already exists: ", meta_file)
+}
+
+
+#### Travel time of PHN based on 2024 population grid ~1km ####
+# 1-km ABS population grid (density: people per km^2)
+pop_grid <- terra::rast(file.path(dataFolder, "abs_popgrid_1km_2024.tif"))
+
+# Source (counts/cell) -> density (people/km^2) on the *source* grid
+area_src <- terra::cellSize(pop_grid, unit = "km")
+dens_src <- pop_grid / area_src
+
+# Project density to the *target* 
+# Make sure travel_time_au has a valid CRS first:
+terra::crs(travel_time_au) <- terra::crs(friction_au)
+dens_tgt <- terra::project(dens_src, travel_time_au, method = "bilinear")
+
+# Convert density back to counts on the *target* grid
+area_tgt <- terra::cellSize(travel_time_au, unit = "km")
+pop_count_res <- dens_tgt * area_tgt
+
+# Mask to Australia
+pop_count_res <- terra::mask(pop_count_res, au_shapefile)
+
+# Clean inputs
+travel_time_au_clean <- terra::ifel(is.finite(travel_time_au), travel_time_au, NA)
+pop_count_res        <- terra::ifel(is.finite(pop_count_res) & pop_count_res >= 0, pop_count_res, NA)
+
+library(exactextractr)
+
+# Stack so the reducer sees both layers
+stack_tt_pop <- c(travel_time_au, pop_count_res)
+
+phn_avg_reach <- exact_extract(
+  x = stack_tt_pop,
+  y = phn_shp,
+  fun = function(df, cf) {
+    # df[[1]] = travel time; df[[2]] = pop count per cell
+    tt  <- df[[1]]
+    pop <- df[[2]]
+
+    keep <- is.finite(tt) & is.finite(pop) & (pop > 0) &
+            is.finite(cf) & (cf > 0)
+
+    if (!any(keep)) return(NA_real_)  # no reachable population -> NA
+    sum(tt[keep] * pop[keep] * cf[keep]) / sum(pop[keep] * cf[keep])
+  },
+  progress = TRUE
+)
+
+phn_map_reach <- phn_shp |>
+  dplyr::mutate(avg_drive_min_reach = phn_avg_reach)
+
+library(sf)
+
+phn_travel_file <- file.path(cacheFolder, "phn_travel_freeshc.gpkg")
+
+if (!file.exists(phn_travel_file)) {
+  sf::st_write(
+    phn_map_reach,
+    dsn = phn_travel_file,
+    driver = "GPKG"
+  )
+  message("✅ Saved new file: ", phn_travel_file)
+} else {
+  message("⚠️ File already exists, skipping: ", phn_travel_file)
+}
+
+
+#### Extract travel time for all cells into data.frame ####
+# This will give a data.frame with columns: x, y, travel_time
+df_all_cells <- terra::as.data.frame(
+  travel_time_au,
+  xy     = TRUE,       # include coordinates
+  na.rm  = FALSE       # keep cells with NA or Inf if you want
+)
+
+
+```
+
+```{r travel time plotting}
+
+#### prescriber locations over friction surface ####
+selected_location_mapping <- ggplot() +
+  geom_spatraster(
+    data = friction_au
+  ) +
+  geom_spatvector(
+    data = au_shapefile,
+    fill = "transparent",
+    col = "grey50"
+  ) +
+  geom_point(
+    data = selected_location_full %>%  
+      mutate(s100_label = as.character(s100_label)),
+    aes(
+      x = x,
+      y = y,
+      color = s100_label
+    ),
+    size = 0.5
+  ) +
+  scale_fill_viridis_c(
+    option = "A",
+    na.value = "transparent",
+    direction = -1
+  ) +
+  scale_color_manual(
+    values = c("0" = "grey60", "1" = "green"),  # Customize colors
+    name = "S100 Prescriber",
+    labels = c("0" = "No", "1" = "Yes")
+  ) +
+  labs(
+    fill = "Resistance",
+    x = element_blank(),
+    y = element_blank()
+  ) +
+  theme_minimal()
+selected_location_mapping
+
+#### Plot PHN average travel time ####
+phn_traveltime_mapping <- ggplot(phn_map_reach) +
+  geom_sf(aes(fill = avg_drive_min_reach), 
+          colour = "grey50", size = 0.2) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Avg Travel Time\n(minutes)"
+  ) +
+  theme_minimal() +
+  labs(
+    title    = "Population-Weighted Mean Travel Time by PHN",
+    subtitle = "",
+    x        = NULL, 
+    y        = NULL
+  ) +
+  theme(
+    axis.text      = element_blank(),
+    panel.grid     = element_blank(),
+    plot.title     = element_text(face = "bold", size = 14),
+    plot.subtitle  = element_text(size = 10)
+  )
+phn_traveltime_mapping
+
+#### Plot travel time with prescriber locations each cell####
+library(ggnewscale)
+pop_zero_mask <- terra::ifel( pop_count_res == 0, 1, NA)
+# Travel-time masked to nonzero-pop cells
+tt_nonzero <- terra::mask(travel_time_au, pop_zero_mask, maskvalues = 1)
+
+smallest_section_drivetime_mapping <- ggplot() +
+  # Grey background for zero-pop cells
+  geom_spatraster(data = pop_zero_mask) +
+  scale_fill_gradientn(
+    colours = c("grey85", "grey85"),
+    limits  = c(0,1), breaks = 1, labels = "Population = 0",
+    na.value = NA, name = NULL
+  ) +
+  ggnewscale::new_scale_fill() +
+  # Travel time only where pop > 0
+  geom_spatraster(data = tt_nonzero) +
+  scale_fill_viridis_c(option = "A", direction = -1, na.value = "transparent", name = "Minutes") +
+  geom_point(
+    data = selected_location_full_clean %>%
+      dplyr::filter(!is.na(s100_label)) %>%
+      dplyr::mutate(s100_label = as.character(s100_label)),
+    aes(x = x, y = y, color = s100_label),
+    size = 0.5
+  ) +
+  scale_color_manual(values = c("0" = "blue", "1" = "green"),
+                     name = "S100 Prescriber", labels = c("0" = "No", "1" = "Yes")) +
+  geom_spatvector(data = phn_shp, fill = "transparent", col = "grey20") +
+  theme_minimal()
+
+smallest_section_drivetime_mapping <- ggplot() +
+  # Grey background for zero-pop cells
+  geom_spatraster(data = pop_zero_mask) +
+  scale_fill_gradientn(
+    colours = c("grey85","grey85"),
+    limits  = c(0, 1),
+    breaks  = 1,
+    labels  = "Population = 0",
+    na.value = NA,
+    name    = NULL
+  ) +
+  ggnewscale::new_scale_fill() +
+  
+  # Travel time only where pop > 0
+  geom_spatraster(data = tt_nonzero) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Minutes"
+  ) +
+  
+  # Prescriber points
+  geom_point(
+    data = selected_location_full_clean %>%
+      dplyr::filter(!is.na(s100_label)) %>%
+      dplyr::mutate(s100_label = as.character(s100_label)),
+    aes(x = x, y = y, color = s100_label),
+    size = 0.5
+  ) +
+  scale_color_manual(
+    values = c("0" = "blue", "1" = "green"),
+    name   = "S100 Prescriber",
+    labels = c("0" = "No", "1" = "Yes")
+  ) +
+  
+  # PHN boundaries 
+  geom_spatvector(
+    data = phn_shp,
+    fill = "transparent",
+    col  = "grey50",
+    linewidth = 0.2
+  ) +
+  
+  theme_minimal() +
+  labs(
+    title    = "Travel Time to Nearest Prescriber (Populated Cells Only)",
+    subtitle = "Australia, motorised friction (2020); zero-population cells in grey",
+    x = NULL, y = NULL
+  ) +
+  theme(
+    axis.text     = element_blank(),
+    panel.grid    = element_blank(),
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10)
+  )
+
+smallest_section_drivetime_mapping
+
+
+```
+
+```{r Syd area travel time plotting}
+#### SYD AREA - WITH BOUNDARY CLIPPING ####
+# 1) Select PHN101–PHN105 and union
+syd_codes <- paste0("PHN", 101:103)
+syd_phn   <- phn_shp |> dplyr::filter(PHN_CODE %in% syd_codes)
+syd_union <- sf::st_union(syd_phn)
+
+# 1a) Keep only the MAINLAND component (largest polygon)
+# Break into individual polygons
+syd_components <- sf::st_cast(syd_union, "MULTIPOLYGON") |> sf::st_cast("POLYGON")
+
+# Calculate area for each polygon
+syd_components$area <- sf::st_area(syd_components)
+
+# Keep the two largest polygons
+syd_mainland <- syd_components[order(syd_components$area, decreasing = TRUE)[1:2], ] |>
+  sf::st_make_valid()
+
+# Union them back into one geometry
+syd_mainland <- sf::st_union(syd_mainland) |> sf::st_make_valid()
+
+pad_dist_m <- 25000
+metric_crs <- 3577                     # GDA94 / Australia Albers (meters)
+rast_crs   <- terra::crs(friction_au)  # WKT string is fine for st_transform
+
+# Buffer 25 km in metric CRS, then transform to raster CRS
+syd_buf_rast <- syd_mainland |>
+  sf::st_transform(metric_crs) |>
+  sf::st_buffer(pad_dist_m) |>
+  sf::st_transform(rast_crs) |>
+  sf::st_make_valid()
+
+# Build bbox in the **raster CRS**
+syd_bbox <- sf::st_bbox(syd_buf_rast)
+syd_ext  <- terra::ext(c(syd_bbox$xmin, syd_bbox$xmax, syd_bbox$ymin, syd_bbox$ymax))
+
+# Convert the mainland polygon to SpatVector in the **raster CRS** for masking
+syd_mask_sv <- terra::vect(sf::st_transform(syd_mainland, rast_crs))
+
+# Crop + mask (now CRS-aligned, warning disappears)
+friction_syd <- friction_au |>
+  terra::crop(syd_ext) |>
+  terra::mask(syd_mask_sv)
+
+syd_bbox_crs <- syd_bbox
+
+# 4) Filter prescribers to be strictly within PHN boundaries (keep attributes)
+# IMPORTANT: selected_location_full_clean was saved in the raster CRS earlier.
+pts_full_sf <- sf::st_as_sf(
+  selected_location_full_clean,
+  coords = c("x","y"),
+  crs    = terra::crs(friction_au),  
+  remove = FALSE
+)
+
+# Make sure Sydney PHNs are in the same CRS
+syd_phn_rast <- sf::st_transform(syd_phn, terra::crs(friction_au))
+
+# Keep only points within Sydney PHNs
+pts_sf_syd <- sf::st_filter(pts_full_sf, syd_phn_rast, .predicate = sf::st_intersects)
+
+# Create a plain data.frame with x/y in raster CRS + attributes (like *_full_clean)
+coords_syd <- sf::st_coordinates(pts_sf_syd)
+selected_location_full_syd <- pts_sf_syd |>
+  dplyr::mutate(x = coords_syd[,1], y = coords_syd[,2]) |>
+  sf::st_drop_geometry() |>
+  dplyr::select(x, y, s100_label, type) |>
+  dplyr::distinct()
+
+selected_location_syd <- pts_sf_syd
+
+library(ggnewscale)
+library(ggplot2)
+
+# Build Sydney pop=0 mask and TT masked to pop>0
+pop_count_res_syd <- pop_count_res |>
+  terra::crop(friction_syd) |>
+  terra::mask(syd_mask_sv)
+
+pop_zero_mask_syd <- terra::ifel(pop_count_res_syd == 0, 1, NA)
+tt_nonzero_syd    <- terra::mask(travel_time_syd, pop_zero_mask_syd, maskvalues = 1)
+
+#### PLOT Sydney travel time with prescribers ####
+tt_syd_plot <- ggplot() +
+  # Grey background for zero-pop cells
+  tidyterra::geom_spatraster(data = pop_zero_mask_syd) +
+  scale_fill_gradientn(
+    colours = c("grey85","grey85"),
+    limits  = c(0, 1),
+    breaks  = 1,
+    labels  = "Population = 0",
+    na.value = NA,
+    name    = NULL
+  ) +
+  ggnewscale::new_scale_fill() +
+
+  # Travel time only where pop > 0
+  tidyterra::geom_spatraster(data = tt_nonzero_syd) +
+  # Color scale for travel time
+  scale_fill_gradientn(
+    colours = rev(rainbow(4)),
+    limits  = c(0, 60),
+    oob     = scales::squish,
+    breaks  = c(0, 30, 60),
+    labels  = c("0", "30", ">60"),
+    na.value = "transparent"
+  ) +
+
+  # Prescriber points (Sydney-only), colored by S100 status
+  geom_point(
+    data = selected_location_full_syd |>
+      dplyr::filter(!is.na(s100_label)) |>
+      dplyr::mutate(s100_label = as.character(s100_label)),
+    aes(x = x, y = y, color = s100_label),
+    size = 0.5
+  ) +
+  scale_color_manual(
+    values = c("0" = "black", "1" = "pink"),
+    name   = "S100 Prescriber",
+    labels = c("0" = "No", "1" = "Yes")
+  ) +
+
+  # PHN boundaries (Sydney only)
+  tidyterra::geom_spatvector(
+    data = terra::vect(sf::st_transform(syd_phn, terra::crs(travel_time_syd))),
+    fill = "transparent",
+    col  = "grey50",
+    linewidth = 0.2
+  ) +
+
+  coord_sf(
+    xlim   = c(syd_bbox_crs$xmin, syd_bbox_crs$xmax),
+    ylim   = c(syd_bbox_crs$ymin, syd_bbox_crs$ymax),
+    expand = FALSE,
+    crs    = rcrs
+  ) +
+  theme_minimal() +
+  labs(
+    title    = "Sydney: Travel Time to Nearest Prescriber (Populated Cells Only)",
+    subtitle = "motorised friction (2020); zero-population cells in grey",
+    x = NULL, y = NULL
+  ) +
+  theme(
+    axis.text     = element_blank(),
+    panel.grid    = element_blank(),
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10)
+  )
+
+tt_syd_plot
+
+tt_syd_plot_withoutgrey <- ggplot() +
+  
+  # Travel time only where pop > 0
+  tidyterra::geom_spatraster(data = travel_time_syd) +
+  # Color scale for travel time
+  scale_fill_gradientn(
+    colours = rev(rainbow(4)),
+    limits  = c(0, 60),
+    oob     = scales::squish,
+    breaks  = c(0, 30, 60),
+    labels  = c("0", "30", ">60"),
+    na.value = "transparent"
+  ) +
+
+  # Prescriber points (Sydney-only), colored by S100 status
+  geom_point(
+    data = selected_location_full_syd |>
+      dplyr::filter(!is.na(s100_label)) |>
+      dplyr::mutate(s100_label = as.character(s100_label)),
+    aes(x = x, y = y, color = s100_label),
+    size = 0.5
+  ) +
+  scale_color_manual(
+    values = c("0" = "black", "1" = "pink"),
+    name   = "S100 Prescriber",
+    labels = c("0" = "No", "1" = "Yes")
+  ) +
+
+  # PHN boundaries (Sydney only)
+  tidyterra::geom_spatvector(
+    data = terra::vect(sf::st_transform(syd_phn, terra::crs(travel_time_syd))),
+    fill = "transparent",
+    col  = "grey50",
+    linewidth = 0.2
+  ) +
+
+  coord_sf(
+    xlim   = c(syd_bbox_crs$xmin, syd_bbox_crs$xmax),
+    ylim   = c(syd_bbox_crs$ymin, syd_bbox_crs$ymax),
+    expand = FALSE,
+    crs    = rcrs
+  ) +
+  theme_minimal() +
+  labs(
+    title    = "Sydney: Travel Time to Nearest Prescriber (Populated Cells Only)",
+    subtitle = "motorised friction (2020); zero-population cells in grey",
+    x = NULL, y = NULL
+  ) +
+  theme(
+    axis.text     = element_blank(),
+    panel.grid    = element_blank(),
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10)
+  )
+
+tt_syd_plot_withoutgrey
+
+####Save output figures####
+SaveFigure <- function(folder, filename, figure, 
+    format = ".png", width = 20, 
+    height = 15, units = "cm", dpi = 300,...) {
+    ggsave(file.path(folder, paste(filename, format, sep = "")), 
+      plot = figure, width = width, height = height, units = units,dpi=dpi, ...)
+}
+
+if (!file.exists(file.path(figFolder, "popgrid_traveltime_syd_plot_20250826.png"))) {
+    SaveFigure(figFolder,"popgrid_traveltime_syd_plot_20250826", tt_syd_plot)
+}
+
+if (!file.exists(file.path(figFolder, "traveltime_syd_plot_20250826.png"))) {
+    SaveFigure(figFolder,"traveltime_syd_plot_20250826", tt_syd_plot_withoutgrey)
+}
+
+if (!file.exists(file.path(figFolder, "resistent_traveltime_syd_plot_2025081101.png"))) {
+    SaveFigure(figFolder,"resistent_traveltime_syd_plot_2025081101.png", friction_syd_plot)
+}
+
+
+#### SYD AREA ####
+# 1) Select PHN101–PHN105 and union
+syd_codes <- paste0("PHN", 101:103)
+syd_phn   <- phn_shp |> dplyr::filter(PHN_CODE %in% syd_codes)
+syd_union <- sf::st_union(syd_phn)
+
+# 1a) Keep only the MAINLAND component (largest polygon)
+# Break into individual polygons
+syd_components <- sf::st_cast(syd_union, "MULTIPOLYGON") |> sf::st_cast("POLYGON")
+
+# Calculate area for each polygon
+syd_components$area <- sf::st_area(syd_components)
+
+# Keep the two largest polygons
+syd_mainland <- syd_components[order(syd_components$area, decreasing = TRUE)[1:2], ] |>
+  sf::st_make_valid()
+
+# Union them back into one geometry
+syd_mainland <- sf::st_union(syd_mainland)
+
+# 2) Build a padded bbox from the mainland only (CRS‑safe)
+rcrs <- sf::st_crs(phn_shp)   # same as friction_au
+pad_dist_m <- 25000
+if (!is.na(rcrs$units_gdal) && rcrs$units_gdal == "metre") {
+  bb_geom <- sf::st_as_sfc(sf::st_bbox(syd_mainland))
+  bb_pad  <- sf::st_buffer(bb_geom, dist = pad_dist_m)
+  syd_bbox_crs <- sf::st_bbox(bb_pad)
+} else {
+  bb_geom <- sf::st_as_sfc(sf::st_bbox(syd_mainland))
+  bb_3857 <- sf::st_transform(bb_geom, 3857)
+  bb_pad  <- sf::st_buffer(bb_3857, dist = pad_dist_m)
+  bb_back <- sf::st_transform(bb_pad, rcrs)
+  syd_bbox_crs <- sf::st_bbox(bb_back)
+}
+
+# 3) Crop/mask using the MAINLAND (no far‑away island)
+syd_ext <- terra::ext(c(syd_bbox_crs$xmin, syd_bbox_crs$xmax,
+                        syd_bbox_crs$ymin, syd_bbox_crs$ymax))
+friction_syd <- terra::crop(friction_au, syd_ext) |>
+  terra::mask(terra::vect(syd_mainland))
+
+# 4) Filter points and recompute travel time (same as before, but bbox from mainland)
+selected_location_sf   <- sf::st_as_sf(selected_location, coords = c("x","y"), crs = 4326) |> sf::st_transform(rcrs)
+coords    <- sf::st_coordinates(selected_location_sf)
+inside    <- coords[,1] >= syd_bbox_crs$xmin & coords[,1] <= syd_bbox_crs$xmax &
+             coords[,2] >= syd_bbox_crs$ymin & coords[,2] <= syd_bbox_crs$ymax
+selected_location_syd  <- selected_location_sf[inside, ]
+
+travel_time_syd <- calculate_travel_time(
+  friction_surface = friction_syd,
+  points           = sf::st_coordinates(selected_location_syd)
+) 
+
+# 5) Plot, using syd_phn outlines but the mainland bbox
+friction_syd_plot <- ggplot() +
+  tidyterra::geom_spatraster(data = friction_syd) +
+  tidyterra::geom_spatvector(data = terra::vect(syd_phn), fill = "transparent", col = "grey30") +
+  tidyterra::geom_spatvector(data = selected_location_syd, col = "grey40", size = 0.5) +
+  scale_fill_viridis_c(option = "A", direction = -1, na.value = "transparent") +
+  labs(fill = "Resistance", x = NULL, y = NULL) +
+  coord_sf(xlim = c(syd_bbox_crs$xmin, syd_bbox_crs$xmax),
+           ylim = c(syd_bbox_crs$ymin, syd_bbox_crs$ymax), expand = FALSE) +
+  theme_minimal()
+
+# "viridis" color scale
+tt_syd_plot <- ggplot() +
+  tidyterra::geom_spatraster(data = travel_time_syd) +
+  scale_fill_viridis_c(
+    option =  "viridis",  # or "plasma", "inferno", "cividis"
+    direction = -1,
+    na.value = "transparent",
+    limits = c(0, 180),
+    oob = scales::squish,
+    breaks = c(0, 30, 60, 90,120,150, 180),
+    labels = c("0", "30", "60", "90","120","150", ">180")
+  ) +
+  tidyterra::geom_spatvector(data = terra::vect(syd_phn), fill = "transparent", col = "grey20") +
+  labs(
+    title = "Greater Sydney Area",
+    fill = "Minutes",
+    x = NULL,
+    y = NULL
+  ) +
+  coord_sf(
+    xlim = c(syd_bbox_crs$xmin, syd_bbox_crs$xmax),
+    ylim = c(syd_bbox_crs$ymin, syd_bbox_crs$ymax),
+    expand = FALSE
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+  )
+
+# rainbow scale
+tt_syd_plot <- ggplot() +
+  tidyterra::geom_spatraster(data = travel_time_syd) +
+  scale_fill_gradientn(
+    colours = rev(rainbow(4)),     # invert the palette (high minutes = deeper color)
+    limits  = c(0, 60),
+    oob     = scales::squish,
+    breaks  = c(0, 30, 60),
+    labels  = c("0", "30", ">60"),
+    na.value = "transparent"
+  ) +
+  tidyterra::geom_spatvector(
+    data = terra::vect(syd_phn),
+    fill = "transparent",
+    col  = "grey20",
+    linewidth = 0.3                # thicker boundary
+  ) +
+  geom_sf(
+    data = selected_location_syd,
+    color = "black",
+    shape = 15,     # square
+    size  = 0.7,    # tweak to taste
+    stroke = 0,
+    show.legend = FALSE
+  ) +
+  labs(
+    title = "Central Sydney Area",
+    fill  = "Minutes",
+    x = NULL, y = NULL
+  ) +
+  coord_sf(
+    xlim = c(syd_bbox_crs$xmin, syd_bbox_crs$xmax),
+    ylim = c(syd_bbox_crs$ymin, syd_bbox_crs$ymax),
+    expand = FALSE
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+  )
+
+#### Extracting mean travel time by SA2 ####
+sa2_shapefile <- file.path(dataFolder, "SA2_2021_AUST_GDA94.shp")
+sa2 <- st_read(sa2_shapefile)
+
+# Pull the CRS from original friction surface (which should be valid)
+orig_crs <- crs(friction_au)
+
+# Assign it to travel‐time raster
+crs(travel_time_au) <- orig_crs
+
+# Now project SA2 vector to that CRS
+sa2_vect <- vect(sa2) 
+sa2_vect <- project(sa2_vect, orig_crs)
+
+# Transform with sf to WGS84
+sa2_wgs84 <- st_transform(sa2, crs = 4326)
+
+# Convert to terra
+sa2_vect <- vect(sa2_wgs84)
+
+# double-check they match:
+stopifnot(crs(sa2_vect) == crs(travel_time_au))
+
+travel_time_au_exNA <- terra::ifel(
+  !is.finite(travel_time_au),  # test infinite / NaN
+  NA,                           # if TRUE, set to NA
+  travel_time_au                # else keep original
+)
+
+# Re-extract mean per SA2
+tt_sa2   <- terra::extract(
+  travel_time_au_exNA,
+  sa2_vect,
+  fun    = mean,
+  na.rm  = TRUE
+)
+
+# Attach back and anything still non-finite becomes NA
+sa2$mean_travel_time_min <- tt_sa2[ , "travel_time"]
+
+library(ggplot2)
+library(viridis)   # for scale_fill_viridis_c()
+
+#### Plotting the mean travel time by SA2 ####
+sa2_drivetime_mapping <- ggplot(sa2) +
+  geom_sf(aes(fill = mean_travel_time_min), 
+          colour = "grey60", size = 0.1) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Avg Drive Time\n(minutes)"
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Mean Drive Time to Nearest Prescriber by SA2",
+    subtitle = "Australia, based on 1 km friction-surface raster",
+    x = NULL, y = NULL
+  ) +
+  theme(
+    axis.text      = element_blank(),
+    panel.grid     = element_blank(),
+    plot.title     = element_text(face = "bold", size = 14),
+    plot.subtitle  = element_text(size = 10)
+  )
+sa2_drivetime_mapping
+
+#### Australia-wide density map ####
+# Using the already loaded data:
+# - sa2: sf with SA2_CODE21 geometry
+# - travel_time_au: terra SpatRaster (1 km travel time for Australia)
+# - friction_au: terra SpatRaster
+# - pop_sa2: already loaded with SA2_CODE21 and pop_size
+
+# 1) Compute SA2 density (people per km²) for all of Australia
+sa2_den_au <- sa2 |>
+  left_join(pop_sa2, by = "SA2_CODE21") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    pop_km2 = if_else(area_km2 > 0, pop_size / area_km2, NA_real_)
+  )
+
+# 2) Reproject SA2 to raster CRS and rasterize density onto the 1 km grid
+terra::crs(travel_time_au) <- terra::crs(friction_au)
+sa2_den_v_au <- terra::vect(st_transform(sa2_den_au, crs(travel_time_au)))
+den_rast_au <- terra::rasterize(
+  sa2_den_v_au,
+  travel_time_au,
+  field = "pop_km2",
+  touches = TRUE
+)
+
+# 3) Choose a threshold
+thr_fixed_au <- 0.01  # people per km²
+
+# 4) Build masks for low/high density areas
+low_density_mask_au <- den_rast_au < thr_fixed_au
+tt_high_density_au <- terra::ifel(low_density_mask_au, NA, travel_time_au)
+
+# 5) Plot the Australia-wide density map
+library(ggnewscale)
+library(cowplot)
+
+# Create the main plot
+tt_au_plot_masked <- ggplot() +
+  
+  # Grey background for low-density
+  geom_spatraster(data = terra::ifel(!low_density_mask_au, NA, travel_time_au)) +
+  scale_fill_gradientn(
+    colours = c("grey90", "grey90"),
+    na.value = NA,
+    guide = "none"
+  ) +
+  
+  # High-density cells in colour
+  new_scale_fill() +
+  geom_spatraster(data = tt_high_density_au) +
+  scale_fill_viridis_c(
+    option = "A",
+    direction = -1,
+    limits = c(0, 600),  # Adjusted for larger distances
+    oob = scales::squish,
+    na.value = NA,
+    name = "Minutes"
+  ) +
+  
+  # Add PHN boundaries
+  tidyterra::geom_spatvector(
+    data = terra::vect(phn_shp),
+    fill = "transparent",
+    col = "grey20",
+    linewidth = 0.2
+  ) +
+  
+  labs(
+    title = "Australia",
+    subtitle = "",
+    x = NULL, y = NULL
+  ) +
+  coord_sf(datum = NA) +  # This preserves the natural aspect ratio
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    panel.grid = element_blank(),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    axis.text = element_blank()
+  )
+
+# Add manual legend for low density areas
+dummy_plot <- ggplot(data.frame(x = 1, y = 1), aes(x, y)) +
+  geom_tile(aes(fill = "SA2 Population density\n<0.01 person/km²"), color = NA) +
+  scale_fill_manual(
+    values = c("SA2 Population density\n<0.01 person/km²" = "grey90"),
+    name = NULL
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10)
+  )
+
+# Create a dummy plot just for the grey legend with square shape
+dummy_plot_selected_location <- ggplot(data.frame(x = 1, y = 1), aes(x, y)) +
+  geom_tile(aes(fill = "S100 prescriber"), color = NA) +
+  scale_fill_manual(
+    values = c("S100 prescriber" = "black"),
+    name = NULL
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),     # Same size as main legend
+              # Square width
+  )
+
+# Extract and combine legends
+main_legend <- get_legend(tt_au_plot_masked)
+grey_legend <- get_legend(dummy_plot)
+selected_location_legend <- get_legend(dummy_plot_selected_location)
+
+plot_without_legend <- tt_au_plot_masked + 
+  theme(legend.position = "none",
+        plot.margin = margin(5, 5, 5, 5, "pt"))
+
+library(patchwork)
+
+combined_legend <- plot_grid(
+  main_legend,
+  grey_legend,
+  selected_location_legend,
+  ncol = 1,
+  align = "v",
+  rel_heights = c(0.1,0.1, 0.1),
+  axis = "l"  # Align to the left
+)
+
+# Final combined plot
+final_plot_au <- plot_grid(
+  plot_without_legend,
+  combined_legend,
+  ncol = 2,
+  rel_widths = c(0.7, 0.3),
+  align = "h"
+)
+
+final_plot_au <- plot_without_legend + combined_legend + 
+  plot_layout(widths = c(0.7, 0.3))
+
+final_plot_au
+
+
+####Save output figures####
+SaveFigure <- function(folder, filename, figure, 
+    format = ".png", width = 20, 
+    height = 15, units = "cm", dpi = 300,...) {
+    ggsave(file.path(folder, paste(filename, format, sep = "")), 
+      plot = figure, width = width, height = height, units = units,dpi=dpi, ...)
+}
+
+if (!file.exists(file.path(figFolder, "traveltime_au_plot_withgrey1_20250814.png"))) {
+    SaveFigure(figFolder,"traveltime_au_plot_withgrey1_20250814", final_plot_au)
+}
+
+#### Calculate average travel time by PHN through the average travel time and population size of SA2####
+library(dplyr)
+library(readr)
+
+# Read in two lookup tables
+pop_sa2   <- read_csv(file.path(dataFolder,"SA2_pop_size_2021.csv") , col_types = cols(
+  SA2_NAME21 = col_character(),
+  SA2_CODE21 = col_character(),
+  pop_size = col_double()))     # columns: SA2_CODE21, pop_size
+phn_lookup <- read_csv(file.path(dataFolder,"phn_sa2.csv"), col_types = cols_only(
+  SA2_NAME21 = col_character(),
+  SA2_CODE21 = col_character(),
+  PHN_CODE = col_character(),
+  PHN_NAME = col_character(),
+  RATIO_FROM_TO = col_double()))    # columns: SA2_CODE21, PHN_CODE, PHN_NAME, RATIO_FROM_TO
+
+# Pull out travel times from sf:
+tt_sa2 <- sa2 %>%
+  st_drop_geometry() %>%                   # keep attributes only
+  select(SA2_CODE21, mean_travel_time_min) %>%
+  filter(!is.na(mean_travel_time_min))     # drop any SA2 with no valid time
+
+# Join everything, allocate population, compute weighted mean
+phn_tt <- tt_sa2 %>%
+  inner_join(pop_sa2,    by = "SA2_CODE21") %>%     # add pop_size
+  inner_join(phn_lookup, by = "SA2_CODE21") %>%     # add PHN and ratio
+  mutate(
+    pop_alloc = pop_size * RATIO_FROM_TO,
+    weighted_time = mean_travel_time_min * pop_alloc
+  ) %>%
+  filter(!is.na(PHN_CODE)) %>%   
+  group_by(PHN_CODE, PHN_NAME) %>%
+  summarise(
+    total_pop    = sum(pop_alloc,    na.rm = TRUE),
+    avg_drive_min = sum(weighted_time, na.rm = TRUE) / total_pop,
+    .groups = "drop"
+  )
+
+phn_tt1 <- tt_sa2 %>%
+  inner_join(pop_sa2,    by = "SA2_CODE21") %>%     # add pop_size
+  inner_join(phn_lookup, by = "SA2_CODE21") %>%     # add PHN and ratio
+  mutate(
+    pop_alloc = pop_size * RATIO_FROM_TO,
+    weighted_time = mean_travel_time_min * pop_alloc
+  ) %>%
+  group_by(PHN_CODE, PHN_NAME) %>%
+  filter(!is.na(weighted_time)) %>%
+  summarise(
+    total_pop    = sum(pop_alloc,    na.rm = TRUE),
+    avg_drive_min = sum(weighted_time, na.rm = TRUE) / total_pop,
+    .groups = "drop"
+  )
+
+phn_tt
+
+# Join computed averages to the PHN shapefile
+phn_map <- phn_shp %>%
+  left_join(phn_tt, by = "PHN_CODE")
+
+# Plot with ggplot2
+phn_traveltime_mapping <- ggplot(phn_map) +
+  geom_sf(aes(fill = avg_drive_min), 
+          colour = "grey50", size = 0.2) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Avg Drive Time\n(minutes)"
+  ) +
+  theme_minimal() +
+  labs(
+    title    = "Population-Weighted Mean Drive Time by PHN",
+    subtitle = "Australia, based on SA2 allocations and 1 km friction raster",
+    x        = NULL, 
+    y        = NULL
+  ) +
+  theme(
+    axis.text      = element_blank(),
+    panel.grid     = element_blank(),
+    plot.title     = element_text(face = "bold", size = 14),
+    plot.subtitle  = element_text(size = 10)
+  )
+
+
+
+library(sf)
+library(terra)
+library(dplyr)
+
+#### Central Sydney density map####
+## - sa2: sf with SA2_CODE21 geometry
+## - travel_time_syd: terra SpatRaster (1 km travel time)
+## - friction_syd: terra SpatRaster (same grid/crs as travel_time_syd)
+## - pop_sa2: data.frame with SA2_CODE21, pop_size
+
+# 1) Compute SA2 density (people per km²)
+sa2_den <- sa2 |>
+  left_join(pop_sa2, by = "SA2_CODE21") |>
+  mutate(
+    area_km2   = as.numeric(st_area(geometry)) / 1e6,
+    pop_km2    = if_else(area_km2 > 0, pop_size / area_km2, NA_real_)
+  )
+
+# 2) Reproject SA2 to raster CRS and rasterize density onto the 1 km grid
+terra::crs(travel_time_syd) <- terra::crs(friction_syd)
+sa2_den_v  <- terra::vect(st_transform(sa2_den, crs(travel_time_syd)))
+den_rast   <- terra::rasterize(
+  sa2_den_v,
+  travel_time_syd,
+  field   = "pop_km2",
+  touches = TRUE          # fill cells touched by polygons
+)
+
+# 3) Choose a threshold (option A: fixed; option B: quantile-based)
+thr_fixed <- 10   # people per km²
+thr_q10   <- terra::global(den_rast, fun = quantile, probs = 0.10, na.rm = TRUE)[1]
+
+# 4) Build a mask of cells to KEEP (>= threshold) and apply it
+keep_mask <- den_rast >= thr_fixed   # or use thr_q10
+tt_syd_masked <- terra::ifel(keep_mask, travel_time_syd, NA)
+
+# Build a factor raster for low/high density classification
+low_density_mask <- den_rast < thr_fixed
+
+# Create a travel-time raster for plotting with NA for low-density cells
+tt_high_density <- terra::ifel(low_density_mask, NA, travel_time_syd)
+
+library(ggnewscale)
+library(cowplot)
+library(grid)
+#### Create the main sydney density plot####
+tt_syd_plot_masked <- ggplot() +
+  
+  # Grey background for low-density (no legend)
+  geom_spatraster(data = terra::ifel(!low_density_mask, NA, travel_time_syd)) +
+  scale_fill_gradientn(
+    colours   = c("grey90", "grey90"),  # all grey
+    na.value  = NA,
+    guide     = "none"
+  ) +
+  
+  # High-density cells in colour
+  new_scale_fill() +
+  geom_spatraster(data = tt_high_density) +
+  scale_fill_gradientn(
+    colours = rev(rainbow(4)),
+    limits  = c(0, 60),
+    oob     = scales::squish,
+    breaks  = c(0, 30, 60),
+    labels  = c("0", "30", ">60"),
+    na.value = NA,
+    name    = "Minutes"
+  ) +
+  
+  tidyterra::geom_spatvector(
+    data = terra::vect(syd_phn),
+    fill = "transparent",
+    col  = "grey20",
+    linewidth = 0.5
+  ) +
+  # Add prescriber locations (selected_location) within PHN boundaries
+geom_sf(
+  data = selected_location_syd,
+  colour = "black",
+  fill   = "black",
+  shape  = 15,   # square pixel look
+  size   = 1.5,
+  stroke = 0,
+  alpha  = 1,
+  show.legend = FALSE
+)+
+  labs(
+    title = "Central Sydney Area",
+    x = NULL, y = NULL
+  ) +
+  coord_sf(
+    xlim = c(syd_bbox_crs$xmin, syd_bbox_crs$xmax),
+    ylim = c(syd_bbox_crs$ymin, syd_bbox_crs$ymax),
+    expand = FALSE,
+    crs = sf::st_crs(syd_phn)
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    panel.grid = element_blank(),
+    legend.position = "right",
+    legend.box = "vertical",
+    legend.margin = margin(0, 0, 0, 0),
+    legend.title = element_text(size = 10),  # Set consistent text size
+    legend.text = element_text(size = 10)   # top, right, bottom, left
+  )
+tt_syd_plot_masked
+
+
+# Create a dummy plot just for the grey legend with square shape
+dummy_plot <- ggplot(data.frame(x = 1, y = 1), aes(x, y)) +
+  geom_tile(aes(fill = "SA2 Population density\n <10 person/km^2"), color = NA) +
+  scale_fill_manual(
+    values = c("SA2 Population density\n <10 person/km^2" = "grey90"),
+    name = NULL
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),     # Same size as main legend
+              # Square width
+  )
+
+# Create a dummy plot just for the grey legend with square shape
+dummy_plot_selected_location <- ggplot(data.frame(x = 1, y = 1), aes(x, y)) +
+  geom_tile(aes(fill = "S100 prescriber"), color = NA) +
+  scale_fill_manual(
+    values = c("S100 prescriber" = "black"),
+    name = NULL
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),     # Same size as main legend
+              # Square width
+  )
+
+# Extract legends
+main_legend <- get_legend(tt_syd_plot_masked)
+grey_legend <- get_legend(dummy_plot)
+selected_location_legend <- get_legend(dummy_plot_selected_location)
+
+# Remove legend from main plot
+plot_without_legend <- tt_syd_plot_masked + theme(legend.position = "none",
+                                                  plot.margin = margin(0, -20, 0, 0, "pt"))
+
+# Combine the two legends vertically with minimal spacing
+combined_legend <- plot_grid(
+  main_legend,
+  grey_legend,
+  selected_location_legend,
+  ncol = 1,
+  align = "v",
+  rel_heights = c(0.4, 0.1,0.3),
+  axis = "l"  # Align to the left
+)
+
+# Combine plot with the combined legend - reduced spacing
+final_plot <- plot_grid(
+  plot_without_legend,
+  combined_legend,
+  ncol = 2,
+  rel_widths = c(1, 0.5),  # Reduced width for legend area
+  align = "h"                # Horizontal alignment
+)
+
+final_plot
+
+if (!file.exists(file.path(figFolder, "traveltime_syd_plot_withgrey10_20250813.png"))) {
+    SaveFigure(figFolder,"traveltime_syd_plot_withgrey10_20250813", final_plot)
+}
+
+if (!file.exists(file.path(figFolder, "traveltime_syd_plot_withgrey500_20250813.png"))) {
+    SaveFigure(figFolder,"traveltime_syd_plot_withgrey500_20250812", tt_syd_plot_masked)
+}
+
+
+
+
+####Save output figures####
+SaveFigure <- function(folder, filename, figure, 
+    format = ".png", width = 20, 
+    height = 15, units = "cm", dpi = 300,...) {
+    ggsave(file.path(folder, paste(filename, format, sep = "")), 
+      plot = figure, width = width, height = height, units = units,dpi=dpi, ...)
+}
+
+# If figure not already created make sure it is not overwritten
+if (!file.exists(file.path(figFolder, "selected_location_mapping_20250826.png"))) {
+    SaveFigure(figFolder,"selected_location_mapping_20250826", selected_location_mapping)
+}
+if (!file.exists(file.path(figFolder, "traveltime_syd_plot_20250826.png"))) {
+    SaveFigure(figFolder,"traveltime_syd_plot_20250826", tt_syd_plot)
+}
+if (!file.exists(file.path(figFolder, "popgrid_shcNhospNgp_smallest_section_drivetime_mapping_20251020.png"))) {
+    SaveFigure(figFolder,"popgrid_shcNhospNgp_smallest_section_drivetime_mapping_20251020", smallest_section_drivetime_mapping)
+}
+if (!file.exists(file.path(figFolder, "popgrid_s100_smallest_section_drivetime_mapping_20251020.png"))) {
+    SaveFigure(figFolder,"popgrid_s100_smallest_section_drivetime_mapping_20251020", smallest_section_drivetime_mapping)
+}
+if (!file.exists(file.path(figFolder, "hospNgp_sa2_drivetime_mapping_20250826.png"))) {
+    SaveFigure(figFolder,"hospNgp_sa2_drivetime_mapping_20250826", sa2_drivetime_mapping)
+}
+if (!file.exists(file.path(figFolder, "popgrid_shcNhospNgp_phn_traveltime_mapping_20251020.png"))) {
+    SaveFigure(figFolder,"popgrid_shcNhospNgp_phn_traveltime_mapping_20251020", phn_traveltime_mapping)
+}
+if (!file.exists(file.path(figFolder, "popgrid_s100_phn_traveltime_mapping_20251020.png"))) {
+    SaveFigure(figFolder,"popgrid_s100_phn_traveltime_mapping_20251020", phn_traveltime_mapping)
+}
+
+
+
+```
+
+
+
+```{r distance to nearest prescriber}
+library(terra)
+
+prescriber_sf <- selected_location_proj   
+# prescriber_sf: an sf with prescriber locations
+pres_rast <- rasterize(
+  vect(prescriber_sf),      # convert sf → SpatVector
+  friction_au,              # template raster
+  field = 1,                # mark prescriber cells = 1
+  background = NA
+)
+
+
+dist_m  <- distance(pres_rast)   # terra::distance measures metres by default
+dist_km <- dist_m / 1000         # convert to kilometres
+dist_km <- terra::ifel(!is.finite(dist_km), NA, dist_km)
+dist_km_aus <- terra::crop(dist_km, au_shapefile)
+dist_km_aus <- terra::mask(dist_km_aus, au_shapefile)
+
+smallest_section_distance_mapping <- ggplot() +
+  geom_spatraster(data = dist_km_aus) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Distance (km)"
+  ) +
+  geom_spatvector(
+    data = phn_shp,
+    fill = "transparent",
+    col  = "grey20"
+  ) +
+  theme_minimal() +
+  labs(fill = "Distance (km)")
+
+
+# assign CRS if needed
+crs(dist_km_aus) <- crs(friction_au)
+
+# extract mean distance per SA2
+tt_sa2_dist <- terra::extract(
+  dist_km_aus,
+  sa2_vect,
+  fun   = mean,
+  na.rm = TRUE
+)
+
+names(tt_sa2_dist)[2] <- "mean_dist_km"
+
+tt_sa2_dist$SA2_CODE21 <- sa2$SA2_CODE21[ tt_sa2_dist$ID ]
+
+tt_sa2_dist <- tt_sa2_dist[ , c("SA2_CODE21","mean_dist_km") ]
+
+sa2 <- sa2 %>%
+  left_join(tt_sa2_dist, by = "SA2_CODE21")
+
+sa2_distance_mapping <- ggplot(sa2) +
+  geom_sf(aes(fill = mean_dist_km), colour = "grey60", size = 0.1) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Avg Distance\n(km)"
+  ) +
+  theme_minimal() +
+  labs(
+    title    = "Mean Distance to Nearest Prescriber by SA2",
+    subtitle = "Australia, based on 1km Euclidean raster",
+    x        = NULL, y = NULL
+  ) +
+  theme(
+    axis.text     = element_blank(),
+    panel.grid    = element_blank(),
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10)
+  )
+
+# PHN level distance 
+phn_tt_dist <- tt_sa2_dist %>% 
+  inner_join(pop_sa2,    by="SA2_CODE21") %>%
+  inner_join(phn_lookup, by="SA2_CODE21") %>%
+  filter(!is.na(PHN_CODE)) %>%
+  mutate(
+    pop_alloc     = pop_size * RATIO_FROM_TO,
+    weighted_dist = mean_dist_km * pop_alloc
+  ) %>%
+  group_by(PHN_CODE, PHN_NAME) %>%
+  summarise(
+    total_pop     = sum(pop_alloc, na.rm=TRUE),
+    avg_dist_km   = sum(weighted_dist, na.rm=TRUE) / total_pop
+  )
+
+phn_map_dist <- left_join(phn_shp, phn_tt_dist, by = c("PHN_CODE" = "PHN_CODE"))
+
+phn_distance_mapping <- ggplot(phn_map_dist) +
+  geom_sf(aes(fill = avg_dist_km), colour = "grey50", size = 0.2) +
+  scale_fill_viridis_c(
+    option    = "A",
+    direction = -1,
+    na.value  = "transparent",
+    name      = "Avg Distance\n(km)"
+  ) +
+  theme_minimal() +
+  labs(
+    title    = "Population Weighted Mean Distance by PHN",
+    subtitle = "Australia, based on SA2 allocations and 1km Euclidean raster",
+    x        = NULL, y = NULL
+  ) +
+  theme(
+    axis.text     = element_blank(),
+    panel.grid    = element_blank(),
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10)
+  )
+
+
+####Save output figures####
+SaveFigure <- function(folder, filename, figure, 
+    format = ".png", width = 15, 
+    height = 10, units = "cm", dpi = 300,...) {
+    ggsave(file.path(folder, paste(filename, format, sep = "")), 
+      plot = figure, width = width, height = height, units = units,dpi=dpi, ...)
+}
+
+# If figure not already created make sure it is not overwritten
+if (!file.exists(file.path(figFolder, "smallest_section_distance_mapping_20250719.png"))) {
+    SaveFigure(figFolder,"smallest_section_distance_mapping_20250719", smallest_section_distance_mapping)
+}
+if (!file.exists(file.path(figFolder, "sa2_distance_mapping_mapping_20250719.png"))) {
+    SaveFigure(figFolder,"sa2_distance_mapping_mapping_20250719", sa2_distance_mapping)
+}
+if (!file.exists(file.path(figFolder, "phn_distance_mapping_20250719.png"))) {
+    SaveFigure(figFolder,"phn_distance_mapping_20250719", phn_distance_mapping)
+}
+
+
+```
+
+
+
+
+```{r logistic regression}
+#### Handle data ####
+library(dplyr)
+library(broom)
+library(purrr)
+
+
+# Add age_group and merge in avg_drive_min
+hiv_data_filter <- hiv_data %>%
+  # a) age groups
+  mutate(
+    age_group = case_when(
+      is.na(age_hiv_notif)          ~ NA_character_,
+      age_hiv_notif < 30            ~ "<30",
+      age_hiv_notif >= 30 & age_hiv_notif < 50  ~ "30-49",
+      age_hiv_notif >= 50           ~ "50+"
+    ),
+    age_group = factor(age_group, levels = c("<30", "30-49", "50+"))
+  ) %>%
+  # b) join in PHN avg times by the PHN code column
+  left_join(
+    phn_map_reach %>% dplyr::select(PHN_CODE, avg_drive_min_reach_s100 = avg_drive_min_reach),
+    by = c("phn_res" = "PHN_CODE")
+  ) %>%
+  # c) drive‐time categories
+  mutate(
+    avg_travel_min_group_s100 = cut(
+      avg_drive_min_reach_s100,
+      breaks = c(-Inf, 5,10,30, 60, Inf),     #c(-Inf, 1, 5, Inf),
+      labels = c("<5","5-<10", "10-<30","30-<60","60+"),  #c("<1", "1-<5", "5+"),
+      right  = FALSE
+    ),
+    avg_travel_min_group_s100 = factor(
+      avg_travel_min_group_s100,
+      labels = c("<5","5-<10", "10-<30","30-<60","60+"),  #c("<1", "1-<5", "5+"),
+    )
+  )
+
+names(hiv_data_filter)
+
+hiv_data_filter <- hiv_data_filter %>%
+  mutate(
+    # 1. Collapse into three groups + preserve NAs
+    hiv_exposure_risk_group = case_when(
+      hiv_exposure_risk %in% c("MSM", "MSMIDU") ~ "MSM",
+      hiv_exposure_risk == "Hetero"            ~ "Hetero",
+      is.na(hiv_exposure_risk)                  ~ NA_character_,
+      TRUE                                      ~ "Other"
+    ),
+    # 2. Turn into a factor with MSM as the reference level
+    hiv_exposure_risk_group = factor(
+      hiv_exposure_risk_group,
+      levels = c("MSM", "Hetero", "Other")
+    ),
+    # 3. Re-factor sex so that Male is the reference
+    sex = factor(sex, levels = c("Male", "Female", "Other")))
+
+erw # stop here to check whether to proceed
+#### Add average travel time and distance groupings ####
+hiv_data_filter <- hiv_data_filter %>%
+  # a) join in PHN avg times by the PHN code column
+  left_join(
+    phn_map_reach_all %>% dplyr::select(PHN_CODE, avg_drive_min_reach_all = avg_drive_min_reach),
+    by = c("phn_res" = "PHN_CODE")
+  ) %>%
+  # b) drive‐time categories
+  mutate(
+    avg_travel_min_group_all = cut(
+      avg_drive_min_reach_all,
+      breaks = c(-Inf, 1, 5, Inf),     #c(-Inf, 1, 5, Inf),
+      labels = c("<1", "1-<5","5+"),  #c("<1", "1-<5", "5+"),
+      right  = FALSE
+    ),
+    avg_travel_min_group_all = factor(
+      avg_travel_min_group_all,
+      levels = c("<1", "1-<5", "5+")
+    )
+  )
+hiv_data_filter <- hiv_data_filter %>%
+  left_join(phn_tt_dist, by = c("phn_res" = "PHN_CODE")) %>%
+  mutate(
+    dist_km_group = cut(
+      avg_dist_km,
+      breaks = c(-Inf, 15, 30, 60, Inf),
+      labels = c("<15km", "5–<30km", "30–<60km", "60+km"),
+      right = FALSE
+    )
+  )
+
+# Inspect new vars
+hiv_data_filter %>% 
+  count(age_group, avg_travel_min_group_s100, sort = TRUE) %>% 
+  print(n = 10)
+
+#### Logistic regression ####
+hiv_data_logistic <- hiv_data_filter %>%
+  filter(previ_diag_overseas == FALSE, # Exclude those with previous diagnosis overseas
+         year_diag >= 2001)#,
+         au_birth %in% c("Overseas")) # "Australia", and "Overseas"
+#hiv_data_logistic$au_birth <- factor(hiv_data_logistic$au_birth)
+#hiv_data_logistic$au_birth <- relevel(hiv_data_logistic$au_birth, ref = "Overseas")
+
+#overall data summary
+vars <- c(
+  "hiv_exposure_risk_group",
+  "sex",
+#  "au_birth",
+  "age_group",
+  "avg_travel_min_group_s100"#,
+#  "avg_travel_min_group_all"#,
+#  "dist_km_group"
+)
+
+group_summaries <- map_dfr(vars, function(v) {
+  
+  hiv_data_logistic %>%
+    # drop NAs in the grouping var
+    filter(!is.na(.data[[v]])) %>%
+    group_by(level = .data[[v]]) %>%
+    summarise(
+      n       = n(),
+      late_n  = sum(late_hiv_diag_flag, na.rm = TRUE),
+      prop_late = late_n / n,
+      .groups = "drop"
+    ) %>%
+    mutate(variable = v) %>%
+    select(variable, level, n, late_n, prop_late)
+})
+
+print(group_summaries)
+
+# Univariate logistic regression for each variable
+
+# Fit one glm per variable and tidy the results
+univ_results <- map_dfr(vars, function(v) {
+  # build formula
+  fml <- as.formula(paste0("late_hiv_diag_flag ~ ", v))
+  
+  # fit univariate model
+  m <- glm(fml, data = hiv_data_logistic, family = binomial(link = "logit"))
+  
+  # tidy: exponentiate to OR, get 95% CI and p-value
+  tidy(m, exponentiate = TRUE, conf.int = TRUE) %>%
+    # keep only the predictor row (drop intercept)
+    filter(term != "(Intercept)") %>%
+    # add a column for which variable this was
+    mutate(variable = v) %>%
+    # rename for clarity
+    select(variable, term, OR = estimate, `2.5 %` = conf.low, `97.5 %` = conf.high, p.value)
+})
+
+#
+print(univ_results)
+
+#### Fit multivariate logistic regression: late_hiv_diag_flag, advanced_hiv_diag_flag, cd4_50_hiv_diag_flag ####
+model <- glm(
+  late_hiv_diag_flag ~  sex  + age_group + hiv_exposure_risk_group+au_birth*avg_travel_min_group_s100, #+ avg_travel_min_group_all, # avg_travel_min_group_s100 or dist_km_group # hiv_exposure_risk_group
+  data   = hiv_data_logistic,
+  family = binomial(link = "logit")
+)
+summary(model)
+
+# Extract coefficients and calculate odds ratios
+odds_ratios <- exp(coef(model))
+# Get the 95% CI on the coefficient (log‐odds) scale
+ci_logodds <- confint(model)
+
+# Exponentiate both the point estimates and the CIs
+or_ci <- exp(cbind(
+  OR      = coef(model),
+  CI_low  = ci_logodds[,1],
+  CI_high = ci_logodds[,2]
+))
+
+# 3. label and view
+colnames(or_ci) <- c("OR", "2.5 %", "97.5 %")
+print(or_ci)
+
+sumry  <- summary(model)
+pvals  <- sumry$coefficients[, "Pr(>|z|)"]
+or_ci_p <- cbind(
+  or_ci,
+  p_value = pvals
+)
+
+# OR in other group
+library(broom)
+library(msm)
+
+vcov_mat <- vcov(model)
+coefs <- coef(model)
+results <- list()
+
+for (lvl in levels(hiv_data_logistic$avg_travel_min_group_s100)[-1]) {
+  main_term <- paste0("avg_travel_min_group_s100", lvl)
+  inter_term <- paste0("au_birthOverseas:avg_travel_min_group_s100", lvl)
+  contrast <- rep(0, length(coefs))
+  contrast[which(names(coefs)==main_term)] <- 1
+  contrast[which(names(coefs)==inter_term)] <- 1
+  est <- sum(coefs * contrast)
+  se  <- sqrt(t(contrast) %*% vcov_mat %*% contrast)
+  ci  <- c(est - 1.96*se, est + 1.96*se)
+  results[[lvl]] <- data.frame(
+    travel_time = lvl,
+    OR = exp(est),
+    CI_low = exp(ci[1]),
+    CI_high = exp(ci[2])
+  )
+}
+do.call(rbind, results)
+
+
+
+# visualise interaction effects
+library(effects)
+eff <- allEffects(model)
+plot(eff, "avg_travel_min_group_s100:hiv_exposure_risk_group",
+     multiline = TRUE, ci.style = "bands", ylab = "Predicted probability of late diagnosis")
+
+
+#Check multicollinearity 
+library(performance)
+check_collinearity(model)
+
+library(vcd)
+tab <- table(hiv_data_logistic$avg_travel_min_group_all,
+             hiv_data_logistic$avg_travel_min_group_s100)
+assocstats(tab)   # gives Cramér’s V, contingency coefficient, etc.
+
+
+# If file not already created make sure it is not overwritten
+if (!file.exists(file.path(resultsFolder, "all_abinter_5group_FREE_shc_logistic_regression_20251109.csv"))) {
+write.csv(or_ci_p, file.path(resultsFolder, "all_abinter_5group_FREE_shc_logistic_regression_20251109.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "os_5group_FREE_shc_unilogistic_regression_20251109.csv"))) {
+write.csv(univ_results, file.path(resultsFolder, "os_5group_FREE_shc_unilogistic_regression_20251109.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "os_5group_FREE_shc_frequency_table_20251109.csv"))) {
+write.csv(group_summaries, file.path(resultsFolder, "os_5group_FREE_shc_frequency_table_20251109.csv"), row.names=TRUE)
+}
+
+
+#### Logistic regression (y = travel time)####
+library(MASS)
+library(broom)
+library(purrr)
+library(dplyr)
+
+#### Ordinal Logistic Regression (y = avg_travel_min_group_s100) ####
+# Prepare data: filter out NAs in outcome
+hiv_data_logistic <- hiv_data %>%
+  filter(previ_diag_overseas == FALSE, # Exclude those with previous diagnosis overseas
+         year_diag >= 2010,!is.na(avg_travel_min_group_s100)) # Exclude those diagnosed before the certain year) 
+
+# Define predictor variables
+vars <- c(
+  "hiv_exposure_risk_group",
+  "sex",
+  "au_birth",
+  "age_group",
+  "late_hiv_diag_flag"
+  # Add/remove variables here as needed
+)
+
+#### 1. Overall data summary ####
+library(purrr)
+
+group_summaries <- purrr::map_dfr(vars, function(v) {
+  hiv_data_logistic %>%
+    dplyr::filter(!is.na(.data[[v]])) %>%
+    dplyr::group_by(level = as.character(.data[[v]])) %>%
+    dplyr::summarise(
+      n        = dplyr::n(),
+      n_lt15   = sum(avg_travel_min_group_s100 == "<15",     na.rm = TRUE),
+      n_15to30 = sum(avg_travel_min_group_s100 == "15-<30",  na.rm = TRUE),
+      n_30to60 = sum(avg_travel_min_group_s100 == "30-<60",  na.rm = TRUE),
+      n_60plus = sum(avg_travel_min_group_s100 == "60+",     na.rm = TRUE),
+      .groups  = "drop"
+    ) %>%
+    dplyr::mutate(variable = v, .before = 1) %>%
+    dplyr::select(dplyr::all_of(
+      c("variable","level","n","n_lt15","n_15to30","n_30to60","n_60plus")
+    ))
+}) %>% dplyr::mutate(
+  prop_lt15   = n_lt15   / n,
+  prop_15to30 = n_15to30 / n,
+  prop_30to60 = n_30to60 / n,
+  prop_60plus = n_60plus / n
+)
+
+print(group_summaries)
+
+
+#### 2. Univariate ordinal logistic regression ####
+# ---- Ensure outcome variable is ordered factor (run once) ----
+hiv_data_logistic <- hiv_data_logistic %>%
+  dplyr::mutate(
+    avg_travel_min_group_s100 = factor(
+      avg_travel_min_group_s100,
+      levels = c("<15", "15-<30", "30-<60", "60+"),
+      ordered = TRUE
+    )
+  )
+
+# ---- Univariate ordinal logistic regression (robust version) ----
+library(purrr)
+
+univ_results <- purrr::map_dfr(vars, function(v) {
+  # Subset and remove missing values
+  df <- hiv_data_logistic %>%
+    dplyr::select(avg_travel_min_group_s100, !!rlang::sym(v)) %>%
+    dplyr::filter(!is.na(avg_travel_min_group_s100), !is.na(!!rlang::sym(v)))
+
+  # If too few observations, return NA row
+  if (nrow(df) < 5) {
+    return(tibble::tibble(
+      variable   = v,
+      term       = NA_character_,
+      OR         = NA_real_,
+      `2.5 %`    = NA_real_,
+      `97.5 %`   = NA_real_,
+      p.value    = NA_real_,
+      n_used     = nrow(df),
+      levels_used= NA_character_
+    ))
+  }
+
+  # Convert predictor: keep numeric as is, convert logical/character to factor
+  x <- df[[v]]
+  if (!is.numeric(x)) x <- factor(x)
+
+  # If only one level, return NA row
+  if (is.factor(x) && nlevels(x) < 2) {
+    return(tibble::tibble(
+      variable   = v,
+      term       = NA_character_,
+      OR         = NA_real_,
+      `2.5 %`    = NA_real_,
+      `97.5 %`   = NA_real_,
+      p.value    = NA_real_,
+      n_used     = nrow(df),
+      levels_used= paste0("levels=", nlevels(x))
+    ))
+  }
+
+  # Construct temporary dataset for fitting
+  fit_df <- tibble::tibble(
+    y = df$avg_travel_min_group_s100,
+    x = x
+  )
+
+  # Fit the model and extract results
+  res <- tryCatch({
+    m <- MASS::polr(y ~ x, data = fit_df, Hess = TRUE)
+
+    summ <- summary(m)
+    coefs <- summ$coefficients[, "Value"]
+    ses   <- summ$coefficients[, "Std. Error"]
+    tvals <- summ$coefficients[, "t value"]
+
+    coef_names <- rownames(summ$coefficients)
+    keep <- grepl("^x", coef_names)   # keep only predictor-related terms
+
+    # If no match, fallback: keep the last rows (likely the predictor terms)
+    if (!any(keep)) {
+      k <- length(coefs)
+      keep <- rep(FALSE, k)
+      last_n <- if (is.factor(x)) max(1, nlevels(x) - 1) else 1
+      keep[(k - last_n + 1):k] <- TRUE
+    }
+
+    coefs <- coefs[keep]
+    ses   <- ses[keep]
+    tvals <- tvals[keep]
+    names_kept <- coef_names[keep]
+
+    # Odds ratios and Wald CI
+    OR  <- exp(coefs)
+    LCL <- exp(coefs - 1.96 * ses)
+    UCL <- exp(coefs + 1.96 * ses)
+
+    # p-values
+    pvs <- 2 * pnorm(abs(tvals), lower.tail = FALSE)
+
+    # Term labels
+    if (is.factor(x)) {
+      # Remove "x" prefix added by model.matrix, then combine with variable name
+      level_terms <- sub("^x", "", names_kept)
+      term_readable <- paste0(v, ":", level_terms)
+      levels_used <- paste(levels(x), collapse = " | ")
+    } else {
+      term_readable <- v
+      levels_used <- NA_character_
+    }
+
+    tibble::tibble(
+      variable    = v,
+      term        = term_readable,
+      OR          = as.numeric(OR),
+      `2.5 %`     = as.numeric(LCL),
+      `97.5 %`    = as.numeric(UCL),
+      p.value     = as.numeric(pvs),
+      n_used      = nrow(fit_df),
+      levels_used = levels_used
+    )
+  }, error = function(e) {
+    tibble::tibble(
+      variable   = v,
+      term       = NA_character_,
+      OR         = NA_real_,
+      `2.5 %`    = NA_real_,
+      `97.5 %`   = NA_real_,
+      p.value    = NA_real_,
+      n_used     = nrow(df),
+      levels_used= NA_character_
+    )
+  })
+
+  res
+})
+
+# View results
+print(univ_results)
+
+
+#### 3. Multivariate ordinal logistic regression ####
+# ---- 0) Ensure ordered outcome (run once) ----
+hiv_data_logistic <- hiv_data_logistic %>%
+  dplyr::mutate(
+    avg_travel_min_group_s100 = factor(
+      avg_travel_min_group_s100,
+      levels = c("<15", "15-<30", "30-<60", "60+"),
+      ordered = TRUE
+    )
+  )
+
+# ---- 1) Define predictors and make sure categoricals are factors with sensible baselines ----
+preds <- c("hiv_exposure_risk_group", "sex", "au_birth", "age_group", "late_hiv_diag_flag")
+
+hiv_data_logistic <- hiv_data_logistic %>%
+  dplyr::mutate(
+    # adjust reference levels as needed for interpretation:
+    hiv_exposure_risk_group = as.factor(hiv_exposure_risk_group),
+    sex                     = as.factor(sex),
+    au_birth                = as.factor(au_birth),
+    age_group               = as.factor(age_group),
+    late_hiv_diag_flag      = as.factor(late_hiv_diag_flag)
+    # Example: set ref levels explicitly (uncomment and edit):
+    # hiv_exposure_risk_group = forcats::fct_relevel(hiv_exposure_risk_group, "MSM"),
+    # sex                     = forcats::fct_relevel(sex, "Male"),
+    # au_birth                = forcats::fct_relevel(au_birth, "Australia-born"),
+    # age_group               = forcats::fct_relevel(age_group, "15-24"),
+    # late_hiv_diag_flag      = forcats::fct_relevel(late_hiv_diag_flag, "0")
+  )
+
+# ---- 2) Assemble model frame and drop incomplete rows explicitly ----
+mf <- hiv_data_logistic %>%
+  dplyr::select(avg_travel_min_group_s100, dplyr::all_of(preds)) %>%
+  tidyr::drop_na()
+
+# ---- 3) Fit polr ----
+model <- MASS::polr(
+  avg_travel_min_group_s100 ~ hiv_exposure_risk_group + sex + au_birth + age_group + late_hiv_diag_flag,
+  data = mf,
+  Hess = TRUE
+)
+
+# ---- 4) Extract slope terms only (exclude thresholds/cutpoints with '|') ----
+sumry <- summary(model)
+coef_mat <- sumry$coefficients
+all_terms <- rownames(coef_mat)
+slope_keep <- !grepl("\\|", all_terms)   # TRUE for predictor coefficients
+beta <- coef_mat[slope_keep, "Value"]
+se   <- coef_mat[slope_keep, "Std. Error"]
+tval <- coef_mat[slope_keep, "t value"]
+term_names <- all_terms[slope_keep]
+
+# ---- 5) Wald ORs, 95% CIs, p-values ----
+OR   <- exp(beta)
+LCL  <- exp(beta - 1.96 * se)
+UCL  <- exp(beta + 1.96 * se)
+pval <- 2 * pnorm(abs(tval), lower.tail = FALSE)
+
+# ---- 6) Make terms human-readable: factor levels => "var:level" ----
+readable_terms <- (function(nms) {
+  # polr usually encodes factor levels as varLevel (e.g., sexFemale) or varB, etc.
+  # Try to split at the first uppercase/level boundary for readability.
+  # Fallback to original names if parsing fails.
+  parsed <- vapply(nms, function(x) {
+    # Try split by the first factor variable name present in the formula
+    # If name contains a factor-style "varLevel", insert ":" before level.
+    hit <- FALSE
+    for (v in preds) {
+      if (startsWith(x, v)) {
+        lvl <- sub(paste0("^", v), "", x)
+        # remove possible backticks
+        lvl <- gsub("`", "", lvl)
+        res <- if (nzchar(lvl)) paste0(v, ":", lvl) else v
+        hit <- TRUE
+        return(res)
+      }
+    }
+    if (!hit) x else x
+  }, character(1))
+  unname(parsed)
+})(term_names)
+
+# ---- 7) Tidy result table ----
+mv_or <- tibble::tibble(
+  term    = readable_terms,
+  OR      = as.numeric(OR),
+  `2.5 %` = as.numeric(LCL),
+  `97.5 %`= as.numeric(UCL),
+  p_value = as.numeric(pval)
+)
+
+# ---- 8) Add simple model diagnostics ----
+diag_tbl <- tibble::tibble(
+  n_used = nrow(mf),
+  AIC    = AIC(model),
+  df_resid = model$edf  # effective df for polr
+)
+
+print(mv_or)
+print(diag_tbl)
+
+
+# If file not already created make sure it is not overwritten
+if (!file.exists(file.path(resultsFolder, "popgrid_shcNhospNgp_logistic_regression_20250827.csv"))) {
+write.csv(or_ci_p, file.path(resultsFolder, "popgrid_shcNhospNgp_logistic_regression_20250827.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "popgrid_shcNhospNgp_unilogistic_regression_20250827.csv"))) {
+write.csv(univ_results, file.path(resultsFolder, "popgrid_shcNhospNgp_unilogistic_regression_20250827.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "popgrid_shcNhospNgp_frequency_table_20251002.csv"))) {
+write.csv(group_summaries, file.path(resultsFolder, "popgrid_shcNhospNgp_frequency_table_20250827.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "popgrid_s100_logistic_regression_20251020.csv"))) {
+write.csv(mv_or, file.path(resultsFolder, "popgrid_s100_logistic_regression_20251020.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "popgrid_s100_unilogistic_regression_20251020.csv"))) {
+write.csv(univ_results, file.path(resultsFolder, "popgrid_s100_unilogistic_regression_20251020.csv"), row.names=TRUE)
+}
+
+if (!file.exists(file.path(resultsFolder, "popgrid_s100_frequency_table_20251020.csv"))) {
+write.csv(group_summaries, file.path(resultsFolder, "popgrid_s100_frequency_table_20251020.csv"), row.names=TRUE)
+}
+
+```
+
