@@ -5,7 +5,7 @@
 *.RData
 *.Ruserdata
 *.png
-
+*RDataTmp
 # Folders to ignore
 projects/*
 !projects/late_hiv_diagnosis
@@ -14,3 +14,5 @@ projects/late_hiv_diagnosis/*
 #projects/late_hiv_diagnosis/data/*
 #!projects/late_hiv_diagnosis/data/xxx.csv
 .Rproj.user
+#personal file
+2_travel_time_personal_use.Rmd

@@ -1,7 +1,7 @@
 #0-SetupProject#
 ================
-This file is to create a new project for the simple HIV model.
-The example used is project investigating the impact of COVID-19 (COVID-19impact).
+This file is to create a new project for the travel time project.
+The example used is estimate travel time to the nearest HIV-related facility in Australia and examine its relationship with late HIV diagnoses.
 
 ```{r Initialise}
 # Only requires base R
@@ -18,15 +18,16 @@ Copy all needed files for the model.
 
 name <- "late_hiv_diagnosis"
 
-# If project not already created make sure it is not overwritten
-if (!file.exists(file.path(projects, name, "data", "hiv_data.csv"))) {
-    # Create project folders 
-    dir.create(file.path(projects, name))
-    dir.create(file.path(projects, name,"data"))
-    dir.create(file.path(projects, name,"output"))
-    dir.create(file.path(projects, name, "figures"))
-   
+# Project root and all required subfolders.
+# recursive = TRUE creates parent folders as needed (works on a fresh clone).
+# showWarnings = FALSE keeps it quiet and idempotent if folders already exist.
+base <- file.path(projects, name)
+
+for (sub in c("data", "data/_cache", "output", "figures")) {
+  dir.create(file.path(base, sub), recursive = TRUE, showWarnings = FALSE)
 }
+
+message("Project skeleton ready at: ", base)
 
 ```
 
