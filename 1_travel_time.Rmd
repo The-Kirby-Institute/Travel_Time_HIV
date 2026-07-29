@@ -48,6 +48,11 @@ projectFolder <- file.path(basePath,"projects", selectedproject)
 dataFolder <- file.path(basePath,"projects", selectedproject,"data")
 resultsFolder <- file.path(basePath,"projects", selectedproject, "output")
 figFolder <- file.path(basePath,"projects", selectedproject,"figures")
+
+# NOTE: absolute path to the restricted-access source data on the analyst's
+# machine. Not reproducible off this machine by design — the line-list is not
+# public. Users: point HIVDataFolder to your own local copy obtained
+# under the relevant data agreement. Nothing downstream writes raw data.
 # HIV data folder - for sourcing latest notification cleaning files
 HIVDataFolder <- file.path("C:", "onedrive", "OneDrive - UNSW", "HIV Trends Across Space and Time", 
   "General")
@@ -225,6 +230,9 @@ location_combined_data %>%
 
 ```{r load runned travel time files}
 #### Load population raster with quick running####
+# Reload cached outputs so the slow travel-time calculation can be skipped.
+# Run EITHER this chunk OR the "Travel time calculation" chunk, never both.
+
 # Paths
 cacheFolder <- file.path(dataFolder, "_cache")
 #s100 only
@@ -266,7 +274,13 @@ phn_map_reach <- sf::st_read(phn_travel_file)
 
 ```{r Travel time calculation}
 #### Jump this chunk if the above are reloaded ####
+# WARNING: this chunk is slow and requires internet (friction surface download).
+# calculate_travel_time() can take many minutes on the national grid.  
+# Its purpose is to generate the cache that the reload chunk reads, normally run once.
 
+# Choose ONE facility set. The second assignment overwrites the first — keep the
+# line for the set you want and comment out the other. Whatever you pick here
+# must match the cache filenames and the regression cut points downstream.
 # Select locations for travel time calculation
 # all
 selected_location_full <- location_combined_data 
@@ -369,6 +383,10 @@ if (!file.exists(meta_file)) {
 
 
 #### Travel time of PHN based on 2024 population grid ~1km ####
+# Population weighting uses the 2024 ABS 1-km grid. Units: travel time in MINUTES,
+# population as PERSON COUNTS per cell (density is reconstructed then re-aggregated
+# to the travel-time grid to preserve totals under reprojection).
+
 # 1-km ABS population grid (density: people per km^2)
 Sys.setenv(PROJ_NETWORK = "OFF")
 
@@ -402,7 +420,9 @@ travel_time_au_clean <- terra::ifel(is.finite(travel_time_au), travel_time_au, N
 # the mean straight-line distance between two random points in the cell, turned
 # into minutes using the cell's own friction value.
 
-# mean distance between two random points in a unit square
+# Expected distance between two uniform random points in a unit square
+# (Robbins constant ≈ 0.5214). Used to estimate mean within-cell travel for
+# cells that contain a facility (assigned travel time 0 by the least-cost surface).
 square_random <- (2 + sqrt(2) + 5 * asinh(1)) / 15            # = 0.5214054
 
 # Keep friction on the same grid/CRS as the travel-time raster
@@ -507,6 +527,8 @@ pct_within_5
 
 
 ```{r travel time plotting}
+# Figures reflect whichever facility set was reloaded/calculated above. The PHN
+# map's colour scale (option, breaks) is tuned per set — see inline comments.
 
 aus_bbox <- sf::st_bbox(sf::st_as_sf(phn_shp))
 
@@ -911,6 +933,11 @@ if (!file.exists(file.path(figFolder, "conceptual_20260707.png"))) {
 
 
 ```{r logistic regression}
+# Outcome: late HIV diagnosis (late_hiv_diag_flag). Analysis restricted to adults
+# (>=18), diagnosed in Australia (previ_diag_overseas == FALSE), 2005-2024.
+# Exposure of interest: PHN population-weighted travel-time category, interacted
+# with diagnosis period.
+
 #### Handle data ####
 
 # Add age_group and merge in avg_drive_min
@@ -934,13 +961,13 @@ hiv_data_filter <- hiv_data %>%
   mutate(
     avg_travel_min_group_s100 = cut(
       avg_drive_min_reach_s100,
-      breaks = c(-Inf, 2, 5, Inf),     #c(-Inf, 2, 5, Inf),c(-Inf,10,30, Inf)
-      labels = c("<2", "2-<5","5+"),  #c("<2", "2-<5", "5+"),c(-Inf,10,60, Inf)
+      breaks = c(-Inf, 2, 5, Inf),     #c(-Inf, 2, 5, Inf) for sensitivity analysis, c(-Inf,10,30, Inf) for main analysis
+      labels = c("<2", "2-<5","5+"),  #c("<2", "2-<5", "5+") for sensitivity analysis, c("<10", "10-<30", "30+") for main analysis
       right  = FALSE
     ),
     avg_travel_min_group_s100 = factor(
       avg_travel_min_group_s100,
-      c("<2", "2-<5","5+"),  #c("<2", "2-<5", "5+"),c(-Inf,10,60, Inf)
+      c("<2", "2-<5","5+"),  #c("<2", "2-<5", "5+") for sensitivity analysis, c("<10", "10-<30", "30+") for main analysis
     )
   )
 
