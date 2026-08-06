@@ -7,8 +7,8 @@ HIV diagnosis. The workflow builds a national motorised-travel friction surface,
 computes least-cost travel time to the nearest facility, weights it by the 2024
 population grid to summarise travel time at the PHN level, and fits logistic
 regression models relating PHN travel-time category to late diagnosis.
- 
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21816969.svg)](https://doi.org/10.5281/zenodo.21816969)
  
 ## Aims
  
