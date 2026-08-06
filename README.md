@@ -131,6 +131,21 @@ this repository to generate the results and figures.
 ## License
  
 Code in this repository is released under the MIT License (see `LICENSE`).
+
+## References
+
+This analysis relies on the following software and data. Please cite them if you
+use or adapt this code.
+
+**Software**
+- traveltime R package — Ryan GE, Tierney N, Golding N and Weiss DJ. traveltime: an R package to calculate travel time across a landscape from user-specified locations. Gates Open Res 2025, 9:50. (https://doi.org/10.12688/gatesopenres.16356.1)
+- Malaria Atlas Project motorised friction surface (motor2020) — Weiss DJ, Nelson A, Vargas-Ruiz CA, et al. Global maps of travel time to healthcare facilities. Nat Med. 2020;26(12):1835-1838. (https://doi.org/10.1038/s41591-020-1059-1)
+
+**Data sources**
+- [ABS 1-km population grid](https://digital.atlas.gov.au/maps/digitalatlas::abs-australian-population-grid-2024/about), 2024 — [access date: 10 October 2025]
+- Facility locations ([S100 prescribers](https://ashm.org.au/prescriber-programs/find-a-prescriber/find-a-hiv-prep-prescriber/); [NHSD general practices and hospitals](https://ecat.ga.gov.au/geonetwork/srv/eng/catalog.search#/metadata/149331);
+  [public sexual health clinics](https://www.racp.edu.au/docs/default-source/fellows/resources/achsmh/register-of-public-sexual-health-clinics.pdf?sfvrsn=e64a2d1a_18)) — [access date: 10 October 2025]
+
  
 ## Disclaimer
  
