@@ -850,13 +850,23 @@ cells <- expand.grid(cx = 1:5, cy = 1:4)
 cells$xmin <- cells$cx - 0.5; cells$xmax <- cells$cx + 0.5
 cells$ymin <- cells$cy - 0.5; cells$ymax <- cells$cy + 0.5
 cells$fill <- "white"
-cells$fill[cells$cx == 2 & cells$cy == 1] <- col_red
-cells$fill[cells$cx == 2 & cells$cy == 4] <- col_blue
+cells$fill[cells$cx == 3 & cells$cy == 1] <- col_red
+cells$fill[cells$cx == 1 & cells$cy == 3] <- col_red
+cells$fill[cells$cx == 3 & cells$cy == 4] <- col_blue
 cells$fill[cells$cx == 5 & cells$cy == 3] <- col_green
 
-centres <- data.frame(x = c(2, 2, 2, 2), y = c(1, 2, 3, 4))
+centres <- data.frame(x = c(3, 3, 3, 3), y = c(1, 2, 3, 4))
 res <- data.frame(x = 5 + runif(1, -0.35, -0.05), y = 3 + runif(1,  0.05, 0.35))
 fac <- data.frame(x = 5 + runif(1,  0.05,  0.35), y = 3 + runif(1, -0.35, -0.05))
+
+path_pts <- data.frame(
+  x = c(1, 2, 3),
+  y = c(3, 4, 4)
+)
+
+cell_res <- data.frame(x = c(1,3), y = c(3,1))
+cell_fac <- data.frame(x = 3, y = 4)
+
 
 conceptual <- ggplot() +
   geom_rect(data = cells,
@@ -876,14 +886,25 @@ conceptual <- ggplot() +
   annotate("text", x = 0.05, y = 4.0, label = "1 km",
            colour = "black", size = 3, angle = 90) +
   ## --- cell-to-cell: map colour & linetype to a label for the legend ---
-  geom_segment(aes(x = 2, y = 1, xend = 2, yend = 4,
-                   colour = "Cell-to-cell", linetype = "Cell-to-cell"),
-               linewidth = 0.7) +
+  geom_path(data = path_pts,
+          aes(x, y, colour = "Cell-to-cell", linetype = "Cell-to-cell"),
+          linewidth = 0.7) +
+  geom_segment(aes(x = 3, y = 1, xend = 3, yend = 4,
+                 colour = "Cell-to-cell", linetype = "Cell-to-cell"),
+             linewidth = 0.7) +
   geom_point(data = centres, aes(x, y), colour = "black", size = 3) +
-  annotate("text", x = 1.75, y = 0.75, label = "resident",
+  geom_point(data = path_pts, aes(x, y), colour = "black", size = 3) +
+  geom_point(data = cell_res, aes(x, y), shape = 21, fill = col_orig,
+           colour = "white", size = 4) +
+  geom_point(data = cell_fac, aes(x, y), shape = 23, fill = col_fac,
+           colour = "white", size = 4) +
+  annotate("text", x = 2.75, y = 0.75, label = "resident",
            colour = "#E8833A", fontface = 2, size = 3, hjust = 0) +
-  annotate("text", x = 1.75, y = 4.25, label = "facility",
-           colour = "#2E6FB5", fontface = 2, size = 3, hjust = 0) +
+  annotate("text", x = 2.75, y = 4.3, label = "facility",
+         colour = "#2E6FB5", fontface = 2, size = 3, hjust = 0) +
+  annotate("text", x = 1.35, y = 2.75, label = "resident",
+         colour = col_orig, fontface = 2, size = 3, hjust = 1) +
+
 
   ## --- within-cell: same trick with a different label ---
   geom_segment(aes(x = res$x, y = res$y, xend = fac$x, yend = fac$y,
@@ -893,9 +914,9 @@ conceptual <- ggplot() +
              colour = "white", size = 4) +
   geom_point(data = fac, aes(x, y), shape = 23, fill = col_fac,
              colour = "white", size = 4) +
-  annotate("text", x = res$x + 0.05, y = res$y + 0.25, label = "resident",
+  annotate("text", x = res$x + 0.05, y = res$y + 0.21, label = "resident",
            colour = col_orig, fontface = 2, size = 3) +
-  annotate("text", x = fac$x, y = fac$y - 0.18, label = "facility",
+  annotate("text", x = fac$x-0.1, y = fac$y - 0.27, label = "facility",
            colour = col_fac, fontface = 2, size = 3) +
 
   ## --- manual scales: identical name => merged into one legend ---
@@ -922,8 +943,8 @@ SaveFigure <- function(folder, filename, figure,
 
 
 
-if (!file.exists(file.path(figFolder, "conceptual_20260707.png"))) {
-    SaveFigure(figFolder,"conceptual_20260707", conceptual)
+if (!file.exists(file.path(figFolder, "conceptual_20260829.png"))) {
+    SaveFigure(figFolder,"conceptual_20260829", conceptual)
 }
 
 
